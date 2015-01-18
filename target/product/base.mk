@@ -56,7 +56,6 @@ PRODUCT_PACKAGES += \
     libmtp \
     libnetlink \
     libnetutils \
-    libreference-ril \
     libreverbwrapper \
     libril \
     librtp_jni \
