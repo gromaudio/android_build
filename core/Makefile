@@ -96,10 +96,11 @@ endif
 # Both of these tags will be removed and replaced with "release-keys"
 # when the target-files is signed in a post-build step.
 ifeq ($(DEFAULT_SYSTEM_DEV_CERTIFICATE),build/target/product/security/testkey)
-BUILD_VERSION_TAGS += test-keys
+BUILD_KEYS := test-keys
 else
-BUILD_VERSION_TAGS += dev-keys
+BUILD_KEYS := dev-keys
 endif
+BUILD_VERSION_TAGS += $(BUILD_KEYS)
 BUILD_VERSION_TAGS := $(subst $(space),$(comma),$(sort $(BUILD_VERSION_TAGS)))
 
 # A human-readable string that descibes this build in detail.
@@ -121,9 +122,9 @@ ifeq ($(TARGET_BUILD_VARIANT),user)
 
   # Dev. branches should have DISPLAY_BUILD_NUMBER set
   ifeq "true" "$(DISPLAY_BUILD_NUMBER)"
-    BUILD_DISPLAY_ID := $(BUILD_ID).$(BUILD_NUMBER)
+    BUILD_DISPLAY_ID := $(BUILD_ID).$(BUILD_NUMBER) $(BUILD_KEYS)
   else
-    BUILD_DISPLAY_ID := $(BUILD_ID)
+    BUILD_DISPLAY_ID := $(BUILD_ID) $(BUILD_KEYS)
   endif
 else
   # Non-user builds should show detailed build information
@@ -190,9 +191,14 @@ $(INSTALLED_BUILD_PROP_TARGET): $(BUILDINFO_SH) $(INTERNAL_BUILD_ID_MAKEFILE) $(
 			TARGET_CPU_ABI2="$(TARGET_CPU_ABI2)" \
 			TARGET_AAPT_CHARACTERISTICS="$(TARGET_AAPT_CHARACTERISTICS)" \
 	        bash $(BUILDINFO_SH) > $@
-	$(hide) if [ -f "$(system_prop_file)" ]; then \
-	          cat $(system_prop_file) >> $@; \
-	        fi
+	$(hide) $(foreach file,$(system_prop_file), \
+		if [ -f "$(file)" ]; then \
+			echo "#" >> $@; \
+			echo Target buildinfo from: "$(file)"; \
+			echo "# from $(file)" >> $@; \
+			echo "#" >> $@; \
+			cat $(file) >> $@; \
+		fi;)
 	$(if $(ADDITIONAL_BUILD_PROPERTIES), \
 		$(hide) echo >> $@; \
 		        echo "#" >> $@; \
@@ -379,6 +385,10 @@ $(INSTALLED_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_RAMDISK_FILES) | $(MINIGZIP)
 	$(call pretty,"Target ram disk: $@")
 	$(hide) $(MKBOOTFS) $(TARGET_ROOT_OUT) | $(MINIGZIP) > $@
 
+.PHONY: ramdisk-nodeps
+ramdisk-nodeps: $(MKBOOTFS) | $(MINIGZIP)
+	@echo "make $@: ignoring dependencies"
+	$(hide) $(MKBOOTFS) $(TARGET_ROOT_OUT) | $(MINIGZIP) > $(INSTALLED_RAMDISK_TARGET)
 
 ifneq ($(strip $(TARGET_NO_KERNEL)),true)
 
@@ -416,12 +426,31 @@ $(INSTALLED_BOOTIMAGE_TARGET): $(MKEXT2IMG) $(INTERNAL_BOOTIMAGE_FILES)
 	$(call pretty,"Target boot image: $@")
 	$(hide) $(MKEXT2BOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) --output $@
 
+.PHONY: bootimage-nodeps
+bootimage-nodeps: $(MKEXT2IMG)
+	@echo "make $@: ignoring dependencies"
+	$(hide) $(MKEXT2BOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) --output $(INSTALLED_BOOTIMAGE_TARGET)
+
 else # TARGET_BOOTIMAGE_USE_EXT2 != true
 
 $(INSTALLED_BOOTIMAGE_TARGET): $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_FILES)
 	$(call pretty,"Target boot image: $@")
-	$(hide) $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $@
-	$(hide) $(call assert-max-image-size,$@,$(BOARD_BOOTIMAGE_PARTITION_SIZE),raw)
+	for dtsplat in $(TARGET_BOARD_DTS_CONFIG); do \
+		DTS_PLATFORM=`echo $$dtsplat | cut -d':' -f1`; \
+		DTS_BOARD=`echo $$dtsplat | cut -d':' -f2`; \
+		BOOT_IMAGE_BOARD=$(patsubst %.img,%-$$DTS_PLATFORM.img,$@); \
+		cp -f $(PRODUCT_OUT)/$$DTS_BOARD $(PRODUCT_OUT)/boot/; \
+		$(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) --second $(PRODUCT_OUT)/$$DTS_BOARD $(BOARD_MKBOOTIMG_ARGS) --output $@; \
+		$(call assert-max-image-size,$@,$(BOARD_BOOTIMAGE_PARTITION_SIZE),raw); \
+		cp -f $@ $$BOOT_IMAGE_BOARD; \
+	done
+
+.PHONY: bootimage-nodeps
+bootimage-nodeps: $(MKBOOTIMG)
+	@echo "make $@: ignoring dependencies"
+	$(hide) $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $(INSTALLED_BOOTIMAGE_TARGET)
+	$(hide) $(call assert-max-image-size,$(INSTALLED_BOOTIMAGE_TARGET),$(BOARD_BOOTIMAGE_PARTITION_SIZE),raw)
+
 endif # TARGET_BOOTIMAGE_USE_EXT2
 
 else	# TARGET_NO_KERNEL
@@ -485,6 +514,7 @@ target_notice_file_html_gz := $(TARGET_OUT_INTERMEDIATES)/NOTICE.html.gz
 tools_notice_file_txt := $(HOST_OUT_INTERMEDIATES)/NOTICE.txt
 tools_notice_file_html := $(HOST_OUT_INTERMEDIATES)/NOTICE.html
 
+ifndef TARGET_BUILD_APPS
 kernel_notice_file := $(TARGET_OUT_NOTICE_FILES)/src/kernel.txt
 pdk_fusion_notice_files := $(filter $(TARGET_OUT_NOTICE_FILES)/%, $(ALL_PDK_FUSION_FILES))
 
@@ -517,6 +547,7 @@ $(installed_notice_html_gz): $(target_notice_file_html_gz) | $(ACP)
 ifeq ($(ONE_SHOT_MAKEFILE),)
 ALL_DEFAULT_INSTALLED_MODULES += $(installed_notice_html_gz)
 endif
+endif  # TARGET_BUILD_APPS
 
 # The kernel isn't really a module, so to get its module file in there, we
 # make the target NOTICE files depend on this particular file too, which will
@@ -704,7 +735,7 @@ $(INSTALLED_RECOVERYIMAGE_TARGET): $(MKBOOTFS) $(MKBOOTIMG) $(MINIGZIP) \
 		$(recovery_fstab) \
 		$(RECOVERY_INSTALL_OTA_KEYS)
 	@echo ----- Making recovery image ------
-	$(hide) rm -rf $(TARGET_RECOVERY_OUT)
+
 	$(hide) mkdir -p $(TARGET_RECOVERY_OUT)
 	$(hide) mkdir -p $(TARGET_RECOVERY_ROOT_OUT)/etc $(TARGET_RECOVERY_ROOT_OUT)/tmp
 	@echo Copying baseline ramdisk...
@@ -712,8 +743,11 @@ $(INSTALLED_RECOVERYIMAGE_TARGET): $(MKBOOTFS) $(MKBOOTIMG) $(MINIGZIP) \
 	@echo Modifying ramdisk contents...
 	$(hide) rm -f $(TARGET_RECOVERY_ROOT_OUT)/init*.rc
 	$(hide) cp -f $(recovery_initrc) $(TARGET_RECOVERY_ROOT_OUT)/
+
 	$(hide) -cp $(TARGET_ROOT_OUT)/init.recovery.*.rc $(TARGET_RECOVERY_ROOT_OUT)/
-	$(hide) cp -f $(recovery_binary) $(TARGET_RECOVERY_ROOT_OUT)/sbin/
+	cp -v $(recovery_binary) $(TARGET_RECOVERY_ROOT_OUT)/sbin/
+	mkdir -p $(TARGET_RECOVERY_ROOT_OUT)/system/bin
+	ln -sf ../../sbin/busybox $(TARGET_RECOVERY_ROOT_OUT)/system/bin/sh
 	$(hide) cp -rf $(recovery_resources_common) $(TARGET_RECOVERY_ROOT_OUT)/
 	$(hide) cp -f $(recovery_font) $(TARGET_RECOVERY_ROOT_OUT)/res/images/font.png
 	$(hide) $(foreach item,$(recovery_resources_private), \
@@ -724,8 +758,14 @@ $(INSTALLED_RECOVERYIMAGE_TARGET): $(MKBOOTFS) $(MKBOOTIMG) $(MINIGZIP) \
 	$(hide) cat $(INSTALLED_DEFAULT_PROP_TARGET) $(recovery_build_prop) \
 	        > $(TARGET_RECOVERY_ROOT_OUT)/default.prop
 	$(hide) $(MKBOOTFS) $(TARGET_RECOVERY_ROOT_OUT) | $(MINIGZIP) > $(recovery_ramdisk)
-	$(hide) $(MKBOOTIMG) $(INTERNAL_RECOVERYIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $@
-	$(hide) $(call assert-max-image-size,$@,$(BOARD_RECOVERYIMAGE_PARTITION_SIZE),raw)
+	for dtsplat in $(TARGET_BOARD_DTS_CONFIG); do \
+		DTS_PLATFORM=`echo $$dtsplat | cut -d':' -f1`; \
+		DTS_BOARD=`echo $$dtsplat | cut -d':' -f2`; \
+		RECOVERY_IMAGE_BOARD=$(patsubst %.img,%-$$DTS_PLATFORM.img,$@); \
+	$(MKBOOTIMG) $(INTERNAL_RECOVERYIMAGE_ARGS) --second $(PRODUCT_OUT)/$$DTS_BOARD $(BOARD_MKBOOTIMG_ARGS) --output $@; \
+	$(call assert-max-image-size,$@,$(BOARD_RECOVERYIMAGE_PARTITION_SIZE),raw); \
+	cp -f $@ $$RECOVERY_IMAGE_BOARD; \
+	done
 	@echo ----- Made recovery image: $@ --------
 
 $(RECOVERY_RESOURCE_ZIP): $(INSTALLED_RECOVERYIMAGE_TARGET)
@@ -742,7 +782,7 @@ ifneq ($(strip $(TARGET_BOOTLOADER_CONFIG)),)
 BOOTLOADER_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-eabi-4.6/bin/arm-eabi-
 BOOTLOADER_ENV := ARCH=arm CROSS_COMPILE=$(BOOTLOADER_CROSS_TOOLCHAIN)
 HOST_PROCESSOR := $(shell cat /proc/cpuinfo | grep processor | wc -l)
-TARGET_BOOTLOADER_IMAGE := $(PRODUCT_OUT)/u-boot.bin
+TARGET_BOOTLOADER_IMAGE := $(PRODUCT_OUT)/u-boot.imx
 
 BOOTLOADER_PATH := bootable/bootloader/uboot-imx/
 BOOTLOADER_CONFIG_FILE := $(BOOTLOADER_PATH)/include/config.h
@@ -750,14 +790,16 @@ BOOTLOADER_CONFIG_FILE := $(BOOTLOADER_PATH)/include/config.h
 bootloader: $(TARGET_BOOTLOADER_IMAGE)
 
 $(TARGET_BOOTLOADER_IMAGE):
-	@for ubootplat in $(TARGET_BOOTLOADER_CONFIG); do \
+	for ubootplat in $(TARGET_BOOTLOADER_CONFIG); do \
 		UBOOT_PLATFORM=`echo $$ubootplat | cut -d':' -f1`; \
 		UBOOT_CONFIG=`echo $$ubootplat | cut -d':' -f2`; \
+        echo $(UBOOT_PLATFORM); \
+        echo $(UBOOT_CONFIG); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ distclean $(BOOTLOADER_ENV); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ $$UBOOT_CONFIG $(BOOTLOADER_ENV); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ $(BOOTLOADER_ENV); \
-		install -D bootable/bootloader/uboot-imx/u-boot.bin $(PRODUCT_OUT)/u-boot-$$UBOOT_PLATFORM.bin; \
-		install -D bootable/bootloader/uboot-imx/u-boot.bin $@; \
+		install -D bootable/bootloader/uboot-imx/u-boot.imx $(PRODUCT_OUT)/u-boot-$$UBOOT_PLATFORM.imx; \
+		install -D bootable/bootloader/uboot-imx/u-boot.imx $@; \
 	done
 else
 bootloader:
@@ -766,7 +808,7 @@ endif
 .PHONY: kernelimage
 ifneq ($(strip $(TARGET_NO_KERNEL)),true)
 KERNEL_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-eabi-4.6/bin/arm-eabi-
-KERNEL_ENV := ARCH=arm CROSS_COMPILE=$(KERNEL_CROSS_TOOLCHAIN)
+KERNEL_ENV := ARCH=arm CROSS_COMPILE=$(KERNEL_CROSS_TOOLCHAIN) LOADADDR=$(LOAD_KERNEL_ENTRY)
 HOST_PROCESSOR := $(shell cat /proc/cpuinfo | grep processor | wc -l)
 INSTALLED_KERNEL_TARGET := $(PRODUCT_OUT)/kernel
 TARGET_PREBUILT_KERNEL := $(PRODUCT_OUT)/kernel
@@ -781,16 +823,24 @@ KERNEL_OUT := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ
 kernelimage: $(TARGET_PREBUILT_KERNEL)
 
 $(KERNEL_CONFIGURE): kernel_imx/arch/arm/configs/$(TARGET_KERNEL_DEFCONF)
+	$(MAKE) -C kernel_imx $(TARGET_KERNEL_DEFCONF) $(KERNEL_ENV)
 
 $(TARGET_KERNEL_CONFIGURE): kernel_imx/arch/arm/configs/$(TARGET_KERNEL_DEFCONF) $(KERNEL_CONFIGURE)
-	$(MAKE) -C kernel_imx $(TARGET_KERNEL_DEFCONF) $(KERNEL_ENV)
 	install -D $(KERNEL_CONFIGURE) $(TARGET_KERNEL_CONFIGURE)
 
-$(TARGET_PREBUILT_KERNEL): $(TARGET_KERNEL_CONFIGURE)
+$(KERNEL_UIMAGE): $(KERNEL_CONFIGURE)
 	$(MAKE) -C kernel_imx -j$(HOST_PROCESSOR) uImage $(KERNEL_ENV)
-	install -D $(KERNEL_UIMAGE)  $(PRODUCT_OUT)/uImage
-	install -D $(KERNEL_ZIMAGE)  $(PRODUCT_OUT)/kernel
+	$(MAKE) -C kernel_imx dtbs $(KERNEL_ENV)
 
+$(TARGET_PREBUILT_KERNEL): $(KERNEL_UIMAGE)
+	install -D $(KERNEL_UIMAGE)  $(PRODUCT_OUT)/uImage
+	install -D $(KERNEL_UIMAGE)  $(PRODUCT_OUT)/boot/uImage
+	install -D $(KERNEL_ZIMAGE)  $(PRODUCT_OUT)/kernel
+	for dtsplat in $(TARGET_BOARD_DTS_CONFIG); do \
+		DTS_PLATFORM=`echo $$dtsplat | cut -d':' -f1`; \
+		DTS_BOARD=`echo $$dtsplat | cut -d':' -f2`; \
+		install -D kernel_imx/arch/arm/boot/dts/$$DTS_BOARD $(PRODUCT_OUT)/$$DTS_BOARD; \
+	done
 else
 kernelimage:
 endif
@@ -935,8 +985,10 @@ $(RECOVERY_FROM_BOOT_PATCH): $(INSTALLED_RECOVERYIMAGE_TARGET) \
 	PATH=$(HOST_OUT_EXECUTABLES):$$PATH $(HOST_OUT_EXECUTABLES)/imgdiff $(INSTALLED_BOOTIMAGE_TARGET) $(INSTALLED_RECOVERYIMAGE_TARGET) $@
 endif
 
+BUILT_KERNELMODULES := $(kernel_modules_src_list)
+$(BUILT_KERNELMODULES): kernelmodules
 
-$(INSTALLED_SYSTEMIMAGE): $(BUILT_SYSTEMIMAGE) $(RECOVERY_FROM_BOOT_PATCH) | $(ACP)
+$(INSTALLED_SYSTEMIMAGE): $(BUILT_SYSTEMIMAGE) $(RECOVERY_FROM_BOOT_PATCH) $(BUILT_KERNELMODULES) | $(ACP)
 	@echo "Install system fs image: $@"
 	$(copy-file-to-target)
 	$(hide) $(call assert-max-image-size,$@ $(RECOVERY_FROM_BOOT_PATCH),$(BOARD_SYSTEMIMAGE_PARTITION_SIZE),yaffs)
@@ -991,6 +1043,11 @@ endif
 #######
 ## platform.zip: system, plus other files to be used in PDK fusion build,
 ## in a zip file
+##
+## PDK_PLATFORM_ZIP_PRODUCT_BINARIES is used to store specified files to platform.zip.
+## The variable will be typically set from BoardConfig.mk.
+## Files under out dir will be rejected to prevent possible conflicts with other rules.
+PDK_PLATFORM_ZIP_PRODUCT_BINARIES := $(filter-out $(OUT_DIR)/%,$(PDK_PLATFORM_ZIP_PRODUCT_BINARIES))
 INSTALLED_PLATFORM_ZIP := $(PRODUCT_OUT)/platform.zip
 $(INSTALLED_PLATFORM_ZIP) : $(INTERNAL_SYSTEMIMAGE_FILES)
 	$(call pretty,"Platform zip package: $(INSTALLED_PLATFORM_ZIP)")
@@ -1002,7 +1059,9 @@ $(INSTALLED_PLATFORM_ZIP) : $(INTERNAL_SYSTEMIMAGE_FILES)
 ifeq (true,$(PLATFORM_ZIP_ADD_JAVA))
 	$(hide) cd $(OUT_DIR) && zip -qry $(patsubst $(OUT_DIR)/%,%,$@) $(PDK_PLATFORM_JAVA_ZIP_CONTENTS)
 endif
-
+ifneq ($(PDK_PLATFORM_ZIP_PRODUCT_BINARIES),)
+	$(hide) zip -qry $@ $(PDK_PLATFORM_ZIP_PRODUCT_BINARIES)
+endif
 
 .PHONY: platform
 platform: $(INSTALLED_PLATFORM_ZIP)
@@ -1263,6 +1322,7 @@ $(BUILT_TARGET_FILES_PACKAGE): \
 		$(INSTALLED_CACHEIMAGE_TARGET) \
 		$(INSTALLED_VENDORIMAGE_TARGET) \
 		$(INSTALLED_ANDROID_INFO_TXT_TARGET) \
+		$(SELINUX_FC) \
 		$(built_ota_tools) \
 		$(APKCERTS_FILE) \
 		$(HOST_OUT_EXECUTABLES)/fs_config \
@@ -1290,6 +1350,9 @@ endif
 ifdef BOARD_KERNEL_PAGESIZE
 	$(hide) echo "$(BOARD_KERNEL_PAGESIZE)" > $(zip_root)/RECOVERY/pagesize
 endif
+ifdef BOARD_KERNEL_DTS
+	$(hide) echo "$(BOARD_KERNEL_DTS)" > $(zip_root)/RECOVERY/dtb
+endif
 	@# Components of the boot image
 	$(hide) mkdir -p $(zip_root)/BOOT
 	$(hide) $(call package_files-copy-root, \
@@ -1309,6 +1372,9 @@ ifdef BOARD_KERNEL_BASE
 endif
 ifdef BOARD_KERNEL_PAGESIZE
 	$(hide) echo "$(BOARD_KERNEL_PAGESIZE)" > $(zip_root)/BOOT/pagesize
+endif
+ifdef BOARD_KERNEL_DTS
+	$(hide) echo "$(BOARD_KERNEL_DTS)" > $(zip_root)/BOOT/dtb
 endif
 	$(hide) $(foreach t,$(INSTALLED_RADIOIMAGE_TARGET),\
 	            mkdir -p $(zip_root)/RADIO; \
@@ -1332,6 +1398,7 @@ endif
 	@# build them.
 	$(hide) mkdir -p $(zip_root)/META
 	$(hide) $(ACP) $(APKCERTS_FILE) $(zip_root)/META/apkcerts.txt
+	$(hide) if test -e $(tool_extensions)/releasetools.py; then $(ACP) $(tool_extensions)/releasetools.py $(zip_root)/META/; fi
 	$(hide)	echo "$(PRODUCT_OTA_PUBLIC_KEYS)" > $(zip_root)/META/otakeys.txt
 	$(hide) echo "recovery_api_version=$(PRIVATE_RECOVERY_API_VERSION)" > $(zip_root)/META/misc_info.txt
 	$(hide) echo "fstab_version=$(PRIVATE_RECOVERY_FSTAB_VERSION)" >> $(zip_root)/META/misc_info.txt
@@ -1350,13 +1417,16 @@ ifdef PRODUCT_EXTRA_RECOVERY_KEYS
 	$(hide) echo "extra_recovery_keys=$(PRODUCT_EXTRA_RECOVERY_KEYS)" >> $(zip_root)/META/misc_info.txt
 endif
 	$(hide) echo "mkbootimg_args=$(BOARD_MKBOOTIMG_ARGS)" >> $(zip_root)/META/misc_info.txt
+	$(hide) echo "use_set_metadata=1" >> $(zip_root)/META/misc_info.txt
+	$(hide) echo "multistage_support=1" >> $(zip_root)/META/misc_info.txt
+	$(hide) echo "update_rename_support=1" >> $(zip_root)/META/misc_info.txt
 	$(call generate-userimage-prop-dictionary, $(zip_root)/META/misc_info.txt)
 	@# Zip everything up, preserving symlinks
 	$(hide) (cd $(zip_root) && zip -qry ../$(notdir $@) .)
 	@# Run fs_config on all the system, boot ramdisk, and recovery ramdisk files in the zip, and save the output
-	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="SYSTEM/" } /^SYSTEM\// {print "system/" $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config > $(zip_root)/META/filesystem_config.txt
-	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="BOOT/RAMDISK/" } /^BOOT\/RAMDISK\// {print $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config > $(zip_root)/META/boot_filesystem_config.txt
-	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="RECOVERY/RAMDISK/" } /^RECOVERY\/RAMDISK\// {print $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config > $(zip_root)/META/recovery_filesystem_config.txt
+	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="SYSTEM/" } /^SYSTEM\// {print "system/" $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config -C -S $(SELINUX_FC) > $(zip_root)/META/filesystem_config.txt
+	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="BOOT/RAMDISK/" } /^BOOT\/RAMDISK\// {print $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config -C -S $(SELINUX_FC) > $(zip_root)/META/boot_filesystem_config.txt
+	$(hide) zipinfo -1 $@ | awk 'BEGIN { FS="RECOVERY/RAMDISK/" } /^RECOVERY\/RAMDISK\// {print $$2}' | $(HOST_OUT_EXECUTABLES)/fs_config -C -S $(SELINUX_FC) > $(zip_root)/META/recovery_filesystem_config.txt
 	$(hide) (cd $(zip_root) && zip -q ../$(notdir $@) META/*filesystem_config.txt)
 
 .PHONY: target-files-package
@@ -1384,12 +1454,25 @@ $(INTERNAL_OTA_PACKAGE_TARGET): KEY_CERT_PAIR := $(DEFAULT_KEY_CERT_PAIR)
 $(INTERNAL_OTA_PACKAGE_TARGET): $(BUILT_TARGET_FILES_PACKAGE) $(DISTTOOLS)
 	@echo "Package OTA: $@"
 	$(hide) ./build/tools/releasetools/ota_from_target_files -v \
-	   -p $(HOST_OUT) \
-	   -k $(KEY_CERT_PAIR) \
-	   $(BUILT_TARGET_FILES_PACKAGE) $@
+			-p $(HOST_OUT) \
+			-k $(KEY_CERT_PAIR) \
+			$(BUILT_TARGET_FILES_PACKAGE) $@
+
+otagenerate: $(INTERNAL_OTA_PACKAGE_TARGET)
+
 
 .PHONY: otapackage
-otapackage: $(INTERNAL_OTA_PACKAGE_TARGET)
+otapackage:
+	@echo "Package OTA Start...: $@"
+	for dtsplat in $(TARGET_BOARD_DTS_CONFIG); do \
+		DTS_PLATFORM=`echo $$dtsplat | cut -d':' -f1`; \
+		DTS_BOARD=`echo $$dtsplat | cut -d':' -f2`; \
+		export BOARD_KERNEL_DTS="$(PRODUCT_OUT)/$$DTS_BOARD" ; \
+		make otagenerate; \
+		OTA_PACKAGE_BOARD=$(patsubst %.zip,%-$$DTS_PLATFORM.zip,$(INTERNAL_OTA_PACKAGE_TARGET)); \
+		cp -f $(INTERNAL_OTA_PACKAGE_TARGET) $$OTA_PACKAGE_BOARD; \
+	done
+
 
 # -----------------------------------------------------------------
 # The update package
@@ -1511,6 +1594,27 @@ $(EMMA_META_ZIP) :
 		zip -@ -q $@
 
 endif # EMMA_INSTRUMENT=true
+
+#------------------------------------------------------------------
+# A zip of Proguard obfuscation dictionary files.
+# Only for apps_only build.
+#
+ifdef TARGET_BUILD_APPS
+PROGUARD_DICT_ZIP := $(PRODUCT_OUT)/$(TARGET_PRODUCT)-proguard-dict-$(FILE_NAME_TAG).zip
+# the dependency will be set up later in build/core/main.mk.
+$(PROGUARD_DICT_ZIP) :
+	@echo "Packaging Proguard obfuscation dictionary files."
+	$(hide) dict_files=`find $(TARGET_OUT_COMMON_INTERMEDIATES)/APPS -name proguard_dictionary`; \
+		if [ -n "$$dict_files" ]; then \
+		  zip -q $@ $$dict_files; \
+		else \
+		  touch $(dir $@)/dummy; \
+		  (cd $(dir $@) && zip -q $(notdir $@) dummy); \
+		  zip -qd $@ dummy; \
+		  rm $(dir $@)/dummy; \
+		fi
+
+endif # TARGET_BUILD_APPS
 
 # -----------------------------------------------------------------
 # dalvik something
@@ -1701,16 +1805,18 @@ $(INTERNAL_FINDBUGS_XML_TARGET): $(ALL_FINDBUGS_FILES)
 $(INTERNAL_FINDBUGS_HTML_TARGET): $(INTERNAL_FINDBUGS_XML_TARGET)
 	@echo ConvertXmlToText: $@
 	$(hide) prebuilt/common/findbugs/bin/convertXmlToText -html:fancy.xsl \
-	$(INTERNAL_FINDBUGS_XML_TARGET)	> $@
+	$(INTERNAL_FINDBUGS_XML_TARGET) > $@
 
 # -----------------------------------------------------------------
 # Findbugs
 
 # -----------------------------------------------------------------
 # These are some additional build tasks that need to be run.
+ifneq ($(dont_bother),true)
 include $(sort $(wildcard $(BUILD_SYSTEM)/tasks/*.mk))
 -include $(sort $(wildcard vendor/*/build/tasks/*.mk))
 -include $(sort $(wildcard device/*/build/tasks/*.mk))
+endif
 
 # -----------------------------------------------------------------
 # Create SDK repository packages. Must be done after tasks/* since

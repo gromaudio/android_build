@@ -299,6 +299,11 @@ def BuildBootableImage(sourcedir, fs_config_file, info_dict=None):
     cmd.append("--base")
     cmd.append(open(fn).read().rstrip("\n"))
 
+  fn = os.path.join(sourcedir, "dtb")
+  if os.access(fn, os.F_OK):
+    cmd.append("--second")
+    cmd.append(open(fn).read().rstrip("\n"))
+
   fn = os.path.join(sourcedir, "pagesize")
   if os.access(fn, os.F_OK):
     cmd.append("--pagesize")
@@ -946,7 +951,7 @@ def ComputeDifferences(diffs):
 
 # map recovery.fstab's fs_types to mount/format "partition types"
 PARTITION_TYPES = { "yaffs2": "MTD", "mtd": "MTD",
-                    "ubifs": "UBI",
+                    "ubifs": "UBI", "vfat": "VFAT",
                     "ext4": "EMMC", "emmc": "EMMC" }
 
 def GetTypeAndDevice(mount_point, info):
@@ -955,3 +960,18 @@ def GetTypeAndDevice(mount_point, info):
     return PARTITION_TYPES[fstab[mount_point].fs_type], fstab[mount_point].device
   else:
     return None
+
+
+def ParseCertificate(data):
+  """Parse a PEM-format certificate."""
+  cert = []
+  save = False
+  for line in data.split("\n"):
+    if "--END CERTIFICATE--" in line:
+      break
+    if save:
+      cert.append(line)
+    if "--BEGIN CERTIFICATE--" in line:
+      save = True
+  cert = "".join(cert).decode('base64')
+  return cert
